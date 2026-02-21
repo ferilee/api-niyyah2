@@ -1,0 +1,15 @@
+services:
+  api-niyyah:
+    image: ghcr.io/ferilee/api-niyyah2:latest
+    container_name: api-niyyah
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    networks:
+      - ferileeNet
+
+networks:
+  ferileeNet:
+    external: true

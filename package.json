@@ -1,0 +1,28 @@
+{
+  "name": "api-niyyah",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun run --watch src/index.ts",
+    "start": "bun run src/index.ts",
+    "check": "tsc --noEmit",
+    "test": "bun test",
+    "minio:up": "docker compose -f docker-compose.minio.yml up -d",
+    "minio:down": "docker compose -f docker-compose.minio.yml down",
+    "minio:logs": "docker compose -f docker-compose.minio.yml logs -f"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.883.0",
+    "drizzle-orm": "^0.44.2",
+    "hono": "^4.9.7",
+    "nodemailer": "^8.0.1",
+    "resend": "^6.9.2",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/nodemailer": "^7.0.10",
+    "typescript": "^5.9.2"
+  }
+}
