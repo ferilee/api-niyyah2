@@ -1,7 +1,7 @@
 services:
-  api-niyyah:
+  api-niyyah2:
     image: ghcr.io/ferilee/api-niyyah2:latest
-    container_name: api-niyyah
+    container_name: api-niyyah2
     restart: unless-stopped
     ports:
       - "3000:3000"
