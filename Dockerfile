@@ -6,7 +6,6 @@ RUN bun install --frozen-lockfile --production
 
 COPY src ./src
 COPY api ./api
-COPY database.sqlite ./database.sqlite
 COPY tsconfig.json ./tsconfig.json
 
 ENV NODE_ENV=production
