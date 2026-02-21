@@ -1,10 +1,10 @@
 services:
-  api-niyyah2:
+  niyyah2:
     image: ghcr.io/ferilee/api-niyyah2:latest
-    container_name: api-niyyah2
+    container_name: niyyah2
     restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "3001:3000" # Mapping port luar 3001 ke port dalam container 3000
     env_file:
       - .env
     networks:
