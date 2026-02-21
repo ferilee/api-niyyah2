@@ -384,18 +384,18 @@ adminRoutes.patch("/users/:id", async (c) => {
       : {}),
     ...(parsed.data.schoolNpsn !== undefined
       ? {
-          schoolNpsn:
-            nextRole === "siswa" || nextRole === "guru"
-              ? (parsed.data.schoolNpsn ?? null)
-              : null,
-        }
+        schoolNpsn:
+          nextRole === "siswa" || nextRole === "guru"
+            ? (parsed.data.schoolNpsn ?? null)
+            : null,
+      }
       : {}),
     ...(parsed.data.role !== undefined ? { role: parsed.data.role } : {}),
     ...(parsed.data.className !== undefined
       ? {
-          className:
-            nextRole === "siswa" ? (parsed.data.className ?? null) : null,
-        }
+        className:
+          nextRole === "siswa" ? (parsed.data.className ?? null) : null,
+      }
       : {}),
     ...(parsed.data.password !== undefined
       ? { passwordHash: nextPasswordHash }
@@ -432,36 +432,186 @@ adminRoutes.patch("/users/:id", async (c) => {
   return c.json({ message: "User berhasil diperbarui", data: updated });
 });
 
+adminRoutes.delete("/users/:id", async (c) => {
+  const authUser = c.get("user");
+  const id = Number(c.req.param("id"));
+  if (Number.isNaN(id) || id < 1) {
+    return c.json({ message: "ID user tidak valid" }, 400);
+  }
+
+  const [existing] = await db
+    .select({ id: users.id, role: users.role, isActive: users.isActive })
+    .from(users)
+    .where(eq(users.id, id))
+    .limit(1);
+
+  if (!existing) {
+    return c.json({ message: "User tidak ditemukan" }, 404);
+  }
+
+  if (existing.id === authUser.id) {
+    return c.json({ message: "Tidak bisa menghapus akun sendiri" }, 400);
+  }
+
+  if (existing.role === "guru" && existing.isActive) {
+    const [activeGuruCount] = await db
+      .select({ count: count() })
+      .from(users)
+      .where(and(eq(users.role, "guru"), eq(users.isActive, true)));
+
+    if (Number(activeGuruCount?.count ?? 0) <= 1) {
+      return c.json(
+        { message: "Tidak bisa menghapus guru aktif terakhir" },
+        400,
+      );
+    }
+  }
+
+  await db.update(users).set({ isActive: false }).where(eq(users.id, id));
+  await writeAdminAuditLog(
+    authUser.id,
+    "deactivate_user",
+    "user",
+    id,
+    null,
+  );
+
+  return c.json({ message: "User berhasil dinonaktifkan" });
+});
+
+adminRoutes.get("/stats", async (c) => {
+  const className = c.req.query("className");
+  const page = Number(c.req.query("page") ?? 1);
+  const limit = Number(c.req.query("limit") ?? 10);
+  const safePage = Math.max(1, page);
+  const safeLimit = Math.min(Math.max(1, limit), 100);
+
+  const filters = [eq(users.role, "siswa")];
+  if (className) {
+    filters.push(eq(users.className, className));
+  }
+
+  const whereClause = and(...filters);
+
+  const [totalResult] = await db
+    .select({ count: count() })
+    .from(users)
+    .where(whereClause);
+
+  const studentList = await db
+    .select({
+      id: users.id,
+      name: users.name,
+      username: users.username,
+      className: users.className,
+      points: users.points,
+      isActive: users.isActive,
+    })
+    .from(users)
+    .where(whereClause)
+    .limit(safeLimit)
+    .offset((safePage - 1) * safeLimit);
+
+  const totalStudents = Number(totalResult?.count ?? 0);
+
+  return c.json({
+    summary: {
+      totalStudents,
+      className: className ?? "Semua",
+    },
+    pagination: {
+      page: safePage,
+      limit: safeLimit,
+      totalItems: totalStudents,
+      totalPages: Math.ceil(totalStudents / safeLimit),
+    },
+    students: studentList,
+  });
+});
+
+adminRoutes.get("/leaderboard", async (c) => {
+  const className = c.req.query("className");
+  const limit = Number(c.req.query("limit") ?? 10);
+  const page = Number(c.req.query("page") ?? 1);
+  const safePage = Math.max(1, page);
+  const safeLimit = Math.min(Math.max(1, limit), 100);
+
+  const filters = [eq(users.role, "siswa"), eq(users.isActive, true)];
+  if (className) {
+    filters.push(eq(users.className, className));
+  }
+
+  const whereClause = and(...filters);
+
+  const [totalResult] = await db
+    .select({ count: count() })
+    .from(users)
+    .where(whereClause);
+
+  const totalItems = Number(totalResult?.count ?? 0);
+
+  const rows = await db
+    .select({
+      id: users.id,
+      name: users.name,
+      username: users.username,
+      className: users.className,
+      points: users.points,
+    })
+    .from(users)
+    .where(whereClause)
+    .orderBy(desc(users.points))
+    .limit(safeLimit)
+    .offset((safePage - 1) * safeLimit);
+
+  const leaderboardRows = rows.map((row, index) => ({
+    rank: (safePage - 1) * safeLimit + index + 1,
+    ...row,
+  }));
+
+  return c.json({
+    pagination: {
+      page: safePage,
+      limit: safeLimit,
+      totalItems,
+      totalPages: Math.ceil(totalItems / safeLimit),
+    },
+    leaderboard: leaderboardRows,
+  });
+});
+
 adminRoutes.get("/habits", async (c) => {
-  const includeInactive = c.req.query("includeInactive") === "true";
+  const includeInactive =
+    c.req.query("includeInactive") === "true" ||
+    c.req.query("showInactive") === "true";
   const rows = includeInactive
     ? await db
-        .select({
-          id: habits.id,
-          name: habits.name,
-          category: habits.category,
-          description: habits.description,
-          points: habits.points,
-          requiresProof: habits.requiresProof,
-          isActive: habits.isActive,
-          createdAt: habits.createdAt,
-        })
-        .from(habits)
-        .orderBy(desc(habits.id))
+      .select({
+        id: habits.id,
+        name: habits.name,
+        category: habits.category,
+        description: habits.description,
+        points: habits.points,
+        requiresProof: habits.requiresProof,
+        isActive: habits.isActive,
+        createdAt: habits.createdAt,
+      })
+      .from(habits)
+      .orderBy(desc(habits.id))
     : await db
-        .select({
-          id: habits.id,
-          name: habits.name,
-          category: habits.category,
-          description: habits.description,
-          points: habits.points,
-          requiresProof: habits.requiresProof,
-          isActive: habits.isActive,
-          createdAt: habits.createdAt,
-        })
-        .from(habits)
-        .where(eq(habits.isActive, true))
-        .orderBy(desc(habits.id));
+      .select({
+        id: habits.id,
+        name: habits.name,
+        category: habits.category,
+        description: habits.description,
+        points: habits.points,
+        requiresProof: habits.requiresProof,
+        isActive: habits.isActive,
+        createdAt: habits.createdAt,
+      })
+      .from(habits)
+      .where(eq(habits.isActive, true))
+      .orderBy(desc(habits.id));
 
   return c.json({ habits: rows });
 });
