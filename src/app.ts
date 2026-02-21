@@ -27,10 +27,23 @@ export function createApp() {
     });
   });
 
-  app.route("/auth", authRoutes);
-  app.route("/user", userRoutes);
-  app.route("/habits", habitRoutes);
-  app.route("/admin", adminRoutes);
+  app.get("/api", (c) => {
+    return c.json({
+      name: "API Niyyah",
+      status: "ok",
+      docs: "Lihat README.md untuk dokumentasi lengkap endpoint.",
+    });
+  });
+
+  const mountCoreRoutes = (prefix = "") => {
+    app.route(`${prefix}/auth`, authRoutes);
+    app.route(`${prefix}/user`, userRoutes);
+    app.route(`${prefix}/habits`, habitRoutes);
+    app.route(`${prefix}/admin`, adminRoutes);
+  };
+
+  mountCoreRoutes("");
+  mountCoreRoutes("/api");
 
   app.notFound((c) => c.json({ message: "Endpoint tidak ditemukan" }, 404));
 

@@ -98,6 +98,8 @@ Endpoint baru terkait bukti foto:
 
 ## Auth Endpoint
 
+Semua endpoint juga tersedia dengan prefix `/api` untuk kompatibilitas reverse proxy (contoh: `/api/auth/login`).
+
 ### POST `/auth/login`
 
 - Untuk guru: login username/password.
