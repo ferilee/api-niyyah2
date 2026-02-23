@@ -13,7 +13,7 @@ export function createApp() {
   app.use(
     "*",
     cors({
-      origin: ["http://localhost:7001", "http://127.0.0.1:7001"],
+      origin: "*",
       allowHeaders: ["Content-Type", "Authorization"],
       allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     }),

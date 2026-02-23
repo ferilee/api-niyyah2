@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { sign } from "hono/jwt";
+import { sign, verify } from "hono/jwt";
 import { and, desc, eq, isNull } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../db/client.ts";
@@ -23,16 +23,294 @@ const otpVerifySchema = z.object({
   code: z.string().regex(/^\d{6}$/),
 });
 
+type AuthRole = "siswa" | "guru" | "admin" | "support" | "editor";
+
 type AuthUser = {
   id: number;
   name: string;
   username: string;
-  role: "siswa" | "guru" | "admin" | "support" | "editor";
+  role: AuthRole;
   email: string | null;
   isActive: boolean;
 };
 
+type OAuthStatePayload = {
+  redirectUri: string;
+  nonce: string;
+  iat: number;
+  exp: number;
+};
+
+type GoogleTokenPayload = {
+  access_token?: string;
+  token_type?: string;
+  scope?: string;
+  expires_in?: number;
+  id_token?: string;
+  error?: string;
+  error_description?: string;
+};
+
+type GoogleUserInfoPayload = {
+  sub?: string;
+  email?: string;
+  email_verified?: boolean;
+  name?: string;
+  picture?: string;
+};
+
 export const authRoutes = new Hono();
+
+authRoutes.get("/google", async (c) => {
+  if (!isGoogleOAuthConfigured()) {
+    return c.json(
+      {
+        message:
+          "Google OAuth belum dikonfigurasi. Isi GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, dan GOOGLE_OAUTH_CALLBACK_URL.",
+      },
+      500,
+    );
+  }
+
+  const requestedRedirectUri = c.req.query("redirect_uri")?.trim() || "";
+  const frontendRedirectUri = resolveFrontendRedirectUri(requestedRedirectUri);
+
+  if (!frontendRedirectUri) {
+    return c.json(
+      {
+        message:
+          "redirect_uri frontend tidak valid atau tidak diizinkan oleh GOOGLE_OAUTH_ALLOWED_REDIRECT_ORIGINS.",
+      },
+      400,
+    );
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const statePayload: OAuthStatePayload = {
+    redirectUri: frontendRedirectUri,
+    nonce: crypto.randomUUID(),
+    iat: now,
+    exp: now + 10 * 60,
+  };
+  const stateToken = await sign(statePayload, env.jwtSecret);
+
+  const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  authUrl.searchParams.set("client_id", env.googleOauthClientId);
+  authUrl.searchParams.set("redirect_uri", env.googleOauthCallbackUrl);
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("scope", env.googleOauthScopes);
+  authUrl.searchParams.set("access_type", "online");
+  authUrl.searchParams.set("include_granted_scopes", "true");
+  authUrl.searchParams.set("prompt", "select_account");
+  authUrl.searchParams.set("state", stateToken);
+
+  return c.redirect(authUrl.toString(), 302);
+});
+
+authRoutes.get("/google/callback", async (c) => {
+  const oauthError = c.req.query("error")?.trim();
+  const authCode = c.req.query("code")?.trim();
+  const stateToken = c.req.query("state")?.trim();
+
+  const frontendRedirectUri =
+    (await resolveFrontendRedirectUriFromState(stateToken)) ||
+    resolveFrontendRedirectUri("") ||
+    "http://localhost:7001/login";
+
+  if (oauthError) {
+    return c.redirect(
+      buildFrontendRedirectUrl(frontendRedirectUri, c.req.url, {
+        error: `Google OAuth error: ${oauthError}`,
+      }),
+      302,
+    );
+  }
+
+  if (!authCode) {
+    return c.redirect(
+      buildFrontendRedirectUrl(frontendRedirectUri, c.req.url, {
+        error: "Google OAuth gagal: code tidak ditemukan.",
+      }),
+      302,
+    );
+  }
+
+  if (!isGoogleOAuthConfigured()) {
+    return c.redirect(
+      buildFrontendRedirectUrl(frontendRedirectUri, c.req.url, {
+        error:
+          "Google OAuth belum dikonfigurasi. Isi GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, dan GOOGLE_OAUTH_CALLBACK_URL.",
+      }),
+      302,
+    );
+  }
+
+  let tokenPayload: GoogleTokenPayload = {};
+
+  try {
+    const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({
+        code: authCode,
+        client_id: env.googleOauthClientId,
+        client_secret: env.googleOauthClientSecret,
+        redirect_uri: env.googleOauthCallbackUrl,
+        grant_type: "authorization_code",
+      }).toString(),
+    });
+
+    tokenPayload = (await tokenResponse.json().catch(() =>
+      ({}),
+    )) as GoogleTokenPayload;
+
+    if (!tokenResponse.ok || !tokenPayload.access_token) {
+      const detail = sanitizeOAuthError(
+        tokenPayload.error_description || tokenPayload.error,
+      );
+      return c.redirect(
+        buildFrontendRedirectUrl(frontendRedirectUri, c.req.url, {
+          error: `Gagal menukar code Google OAuth.${detail ? ` ${detail}` : ""}`,
+        }),
+        302,
+      );
+    }
+  } catch (error) {
+    return c.redirect(
+      buildFrontendRedirectUrl(frontendRedirectUri, c.req.url, {
+        error: `Gagal koneksi ke token endpoint Google. ${sanitizeOAuthError(error instanceof Error ? error.message : "Unknown error")}`,
+      }),
+      302,
+    );
+  }
+
+  let googleUser: GoogleUserInfoPayload = {};
+
+  try {
+    const userInfoResponse = await fetch(
+      "https://openidconnect.googleapis.com/v1/userinfo",
+      {
+        headers: {
+          Authorization: `Bearer ${tokenPayload.access_token}`,
+        },
+      },
+    );
+
+    googleUser = (await userInfoResponse.json().catch(() =>
+      ({}),
+    )) as GoogleUserInfoPayload;
+
+    if (!userInfoResponse.ok) {
+      return c.redirect(
+        buildFrontendRedirectUrl(frontendRedirectUri, c.req.url, {
+          error: "Gagal mengambil profil Google user.",
+        }),
+        302,
+      );
+    }
+  } catch (error) {
+    return c.redirect(
+      buildFrontendRedirectUrl(frontendRedirectUri, c.req.url, {
+        error: `Gagal koneksi ke userinfo Google. ${sanitizeOAuthError(error instanceof Error ? error.message : "Unknown error")}`,
+      }),
+      302,
+    );
+  }
+
+  const normalizedEmail = String(googleUser.email || "")
+    .trim()
+    .toLowerCase();
+  if (!normalizedEmail) {
+    return c.redirect(
+      buildFrontendRedirectUrl(frontendRedirectUri, c.req.url, {
+        error: "Akun Google tidak memiliki email.",
+      }),
+      302,
+    );
+  }
+
+  if (googleUser.email_verified !== true) {
+    return c.redirect(
+      buildFrontendRedirectUrl(frontendRedirectUri, c.req.url, {
+        error: "Email Google belum terverifikasi.",
+      }),
+      302,
+    );
+  }
+
+  let user = await findUserByEmail(normalizedEmail);
+  if (!user) {
+    user = await createAutoStudentUser(normalizedEmail);
+  }
+
+  if (!user.isActive) {
+    return c.redirect(
+      buildFrontendRedirectUrl(frontendRedirectUri, c.req.url, {
+        error: "Akun tidak aktif.",
+      }),
+      302,
+    );
+  }
+
+  if (user.role === "admin") {
+    return c.redirect(
+      buildFrontendRedirectUrl(frontendRedirectUri, c.req.url, {
+        error: "Admin harus login menggunakan Username dan Password.",
+      }),
+      302,
+    );
+  }
+
+  const [authUser] = await db
+    .select({
+      id: users.id,
+      name: users.name,
+      username: users.username,
+      role: users.role,
+      className: users.className,
+      points: users.points,
+      isActive: users.isActive,
+      email: users.email,
+    })
+    .from(users)
+    .where(eq(users.id, user.id))
+    .limit(1);
+
+  if (!authUser) {
+    return c.redirect(
+      buildFrontendRedirectUrl(frontendRedirectUri, c.req.url, {
+        error: "User tidak ditemukan setelah login Google.",
+      }),
+      302,
+    );
+  }
+
+  const token = await buildAccessToken(
+    authUser.id,
+    authUser.username,
+    authUser.role,
+  );
+
+  const userPayload = {
+    id: authUser.id,
+    name: authUser.name,
+    username: authUser.username,
+    role: authUser.role,
+    className: authUser.className,
+    points: authUser.points,
+    email: authUser.email,
+  };
+
+  return c.redirect(
+    buildFrontendRedirectUrl(frontendRedirectUri, c.req.url, {
+      token,
+      user: JSON.stringify(userPayload),
+    }),
+    302,
+  );
+});
 
 authRoutes.post("/login", async (c) => {
   const json = await c.req.json().catch(() => null);
@@ -92,7 +370,11 @@ authRoutes.post("/login", async (c) => {
     return c.json({ message: "Username atau password salah" }, 401);
   }
 
-  const token = await buildAccessToken(authUser.id, authUser.username, authUser.role);
+  const token = await buildAccessToken(
+    authUser.id,
+    authUser.username,
+    authUser.role,
+  );
 
   return c.json({
     token,
@@ -299,10 +581,99 @@ authRoutes.post("/otp/verify", async (c) => {
   });
 });
 
+function isGoogleOAuthConfigured() {
+  return Boolean(
+    env.googleOauthClientId &&
+      env.googleOauthClientSecret &&
+      env.googleOauthCallbackUrl,
+  );
+}
+
+function sanitizeOAuthError(value: string | undefined): string {
+  if (!value) return "";
+  return value.replace(/\s+/g, " ").trim().slice(0, 220);
+}
+
+function resolveFrontendRedirectUri(candidate: string): string | null {
+  if (candidate && isAllowedFrontendRedirectUri(candidate)) {
+    return candidate;
+  }
+
+  if (
+    env.googleOauthFrontendRedirectUrl &&
+    isAllowedFrontendRedirectUri(env.googleOauthFrontendRedirectUrl)
+  ) {
+    return env.googleOauthFrontendRedirectUrl;
+  }
+
+  return null;
+}
+
+function isAllowedFrontendRedirectUri(candidate: string): boolean {
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return false;
+    }
+
+    return env.googleOauthAllowedRedirectOrigins.includes(parsed.origin);
+  } catch {
+    return false;
+  }
+}
+
+async function resolveFrontendRedirectUriFromState(
+  stateToken: string | undefined,
+): Promise<string | null> {
+  if (!stateToken) return null;
+
+  try {
+    const payload = (await verify(stateToken, env.jwtSecret, "HS256")) as
+      | Record<string, unknown>
+      | null;
+
+    const redirectUri =
+      payload && typeof payload.redirectUri === "string"
+        ? payload.redirectUri
+        : "";
+
+    if (!redirectUri || !isAllowedFrontendRedirectUri(redirectUri)) {
+      return null;
+    }
+
+    return redirectUri;
+  } catch {
+    return null;
+  }
+}
+
+function buildFrontendRedirectUrl(
+  frontendRedirectUri: string,
+  requestUrl: string,
+  params: Record<string, string>,
+): string {
+  const url = toUrl(frontendRedirectUri, requestUrl);
+
+  for (const [key, value] of Object.entries(params)) {
+    if (!value) continue;
+    url.searchParams.set(key, value);
+  }
+
+  return url.toString();
+}
+
+function toUrl(value: string, base: string): URL {
+  try {
+    return new URL(value);
+  } catch {
+    return new URL(value, base);
+  }
+}
+
 async function buildAccessToken(
   userId: number,
   username: string,
-  role: "siswa" | "guru" | "admin" | "support" | "editor",
+  role: AuthRole,
 ) {
   return sign(
     {

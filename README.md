@@ -53,6 +53,44 @@ Mode debug lokal:
 - `OTP_DEBUG_RETURN_CODE=true` untuk mengembalikan kode OTP di response (jangan aktifkan di production)
 - `OTP_DEBUG_FIXED_CODE=123456` untuk kode OTP statis saat testing
 
+## Konfigurasi Google OAuth
+
+Isi variabel berikut di `.env` backend:
+
+- `GOOGLE_OAUTH_CLIENT_ID=...`
+- `GOOGLE_OAUTH_CLIENT_SECRET=...`
+- `GOOGLE_OAUTH_CALLBACK_URL=http://localhost:3000/auth/google/callback`
+- `GOOGLE_OAUTH_FRONTEND_REDIRECT_URL=http://localhost:7001/login`
+- `GOOGLE_OAUTH_SCOPES=openid email profile`
+- `GOOGLE_OAUTH_ALLOWED_REDIRECT_ORIGINS=http://localhost:7001,http://127.0.0.1:7001`
+
+Di Google Cloud Console (OAuth client web):
+
+- Authorized redirect URI: `http://localhost:3000/auth/google/callback`
+
+Flow endpoint:
+
+- `GET /auth/google` untuk memulai login Google
+- `GET /auth/google/callback` untuk callback Google
+
+Frontend bisa mengirim `redirect_uri` saat memanggil `/auth/google`, contoh:
+
+```text
+/auth/google?redirect_uri=http://localhost:7001/login
+```
+
+Setelah sukses backend akan redirect ke frontend dalam format:
+
+```text
+/login?token=...&user=...
+```
+
+Jika gagal:
+
+```text
+/login?error=...
+```
+
 ## Seed Data Default
 
 - Guru:
